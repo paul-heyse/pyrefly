@@ -220,6 +220,8 @@ pub struct PysaReporter {
     pub type_of_expressions_directory: PathBuf,
     pub call_graphs_directory: PathBuf,
     pub format: PysaFormat,
+    /// lctx: `false` keeps Pysa solutions in memory without writing report files.
+    pub write_files: bool,
 }
 
 impl PysaReporter {
@@ -248,6 +250,7 @@ impl PysaReporter {
             type_of_expressions_directory,
             call_graphs_directory,
             format,
+            write_files: true,
         }))
     }
 
@@ -262,6 +265,9 @@ impl PysaReporter {
     ///
     /// This can perform cross-module lookups using the `transaction` (wrapped in `PysaResolver`).
     pub fn report_module(&self, handle: &Handle, transaction: &Transaction) {
+        if !self.write_files {
+            return;
+        }
         let info_filename = match handle.path().details() {
             ModulePathDetails::Namespace(_) => None,
             _ => Some(PathBuf::from(format!(

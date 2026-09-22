@@ -851,6 +851,11 @@ impl<'a> Transaction<'a> {
         self.data.pysa_reporter.take()
     }
 
+    /// lctx: borrow the installed pysa reporter (its `ModuleIds`) while modules still solve lazily.
+    pub fn pysa_reporter(&self) -> Option<&crate::report::pysa::PysaReporter> {
+        self.data.pysa_reporter.as_deref()
+    }
+
     /// Set the cinderx reporter for inline extraction during type checking.
     pub fn set_cinderx_reporter(
         &mut self,
@@ -2651,7 +2656,7 @@ impl<'a> Transaction<'a> {
         builtin_module_for_name(&self.lookup(module_data), handle.module(), name)
     }
 
-    pub(crate) fn get_exports_data(&self, handle: &Handle) -> Arc<Exports> {
+    pub fn get_exports_data(&self, handle: &Handle) -> Arc<Exports> {
         let module_data = self.get_module(handle);
         self.lookup_export(module_data)
     }
