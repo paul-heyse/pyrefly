@@ -1645,6 +1645,18 @@ impl Answers {
         Some(self.get_idx(idx)?.ty().clone())
     }
 
+    /// The declared annotation an annotation key holds (a return or variable annotation), when
+    /// the module binds that key, borrowed as solved: no wrapping, such as an `async def`'s
+    /// `Coroutine`, is applied (lctx; composes `key_to_idx_hashed_opt` and `get_idx`).
+    pub fn get_annotation(
+        &self,
+        bindings: &crate::binding::bindings::Bindings,
+        key: &crate::binding::binding::KeyAnnotation,
+    ) -> Option<&pyrefly_types::annotation::Annotation> {
+        let idx = bindings.key_to_idx_hashed_opt(starlark_map::Hashed::new(key))?;
+        Some(&self.get_idx(idx)?.annotation)
+    }
+
     pub fn get_type_trace(&self, range: TextRange) -> Option<Type> {
         let lock = self.trace.as_ref()?.lock();
         Some(lock.types.get(&range)?.as_ref().clone())
