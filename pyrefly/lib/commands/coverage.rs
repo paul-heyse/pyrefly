@@ -6,7 +6,7 @@
  */
 
 mod check;
-mod collect;
+pub mod collect;
 pub(crate) mod report;
 mod types;
 

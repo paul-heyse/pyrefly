@@ -1188,7 +1188,7 @@ impl ClassField {
         }
     }
 
-    fn dataclass_flags_of(&self, heap: &TypeHeap) -> DataclassFieldKeywords {
+    pub fn dataclass_flags_of(&self, heap: &TypeHeap) -> DataclassFieldKeywords {
         match &self.0 {
             ClassFieldInner::Property { .. } => DataclassFieldKeywords::new(),
             ClassFieldInner::Descriptor { descriptor, .. } => match &descriptor.initialization {
