@@ -251,12 +251,12 @@ fn classify_annotation(
 
 /// Returns true if the name is public: does not start with `_`, or is a dunder (`__x__`).
 /// Matches typestats `is_public_name`.
-fn is_public_name(name: &str) -> bool {
+pub fn is_public_name(name: &str) -> bool {
     !name.starts_with('_') || name.ends_with("__")
 }
 
 /// A module is public when every dotted-path component is public.
-fn is_public_module(module: ModuleName) -> bool {
+pub fn is_public_module(module: ModuleName) -> bool {
     module.as_str().split('.').all(is_public_name)
 }
 
@@ -279,7 +279,7 @@ fn is_public_fqn(fqn: &str, module_prefix: &str, public_fqns: &HashSet<String>) 
 }
 
 /// Module-level dunders that typestats always excludes from the report.
-const EXCLUDED_MODULE_DUNDERS: &[&str] = &[
+pub const EXCLUDED_MODULE_DUNDERS: &[&str] = &[
     // User-level module hooks.
     "__all__",
     "__dir__",
@@ -301,7 +301,7 @@ const EXCLUDED_MODULE_DUNDERS: &[&str] = &[
 ];
 
 /// Walk re-exports to the defining module's handle and name, `None` on cycle/miss.
-fn trace_export_origin(
+pub fn trace_export_origin(
     handle: &Handle,
     mut cur_name: Name,
     transaction: &Transaction,
@@ -333,7 +333,7 @@ fn trace_export_origin(
 
 /// Collect origin FQNs of all publicly exported names across public modules, plus the deduped
 /// handles of cross-module re-export origins.
-fn compute_public_fqns(
+pub fn compute_public_fqns(
     handles: &[Handle],
     transaction: &Transaction,
 ) -> (HashSet<String>, SmallSet<Handle>) {

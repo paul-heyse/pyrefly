@@ -169,8 +169,8 @@ impl std::fmt::Display for OriginKind {
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Hash, PartialOrd, Ord)]
 pub struct Origin {
-    kind: OriginKind,
-    location: PysaLocation,
+    pub kind: OriginKind,
+    pub location: PysaLocation,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, PartialOrd, Ord)]

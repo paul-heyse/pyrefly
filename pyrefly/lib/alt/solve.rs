@@ -1825,9 +1825,22 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         errors: &ErrorCollector,
         context: Option<&dyn Fn() -> ErrorContext>,
     ) -> ContextExit {
+        self.context_value_exit_observed(context_manager_type, kind, range, errors, context, None)
+    }
+
+    fn context_value_exit_observed(
+        &self,
+        context_manager_type: &Type,
+        kind: IsAsync,
+        range: TextRange,
+        errors: &ErrorCollector,
+        context: Option<&dyn Fn() -> ErrorContext>,
+        observer: Option<&mut dyn FnMut(&Type, &ErrorCollector, crate::alt::observations::ContextExitAwaitStatus, &Type, &ErrorCollector, crate::alt::observations::ContextExitAwaitStatus)>,
+    ) -> ContextExit {
+        use crate::alt::observations::ContextExitAwaitStatus;
         // Call `__exit__` or `__aexit__` and unwrap the results if async, swallowing any errors from the call itself
         let call_exit = |exit_arg_types, swallow_errors| match kind {
-            IsAsync::Sync => self.call_method_or_error(
+            IsAsync::Sync => (self.call_method_or_error(
                 context_manager_type,
                 &kind.context_exit_dunder(),
                 range,
@@ -1835,7 +1848,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 &[],
                 swallow_errors,
                 context,
-            ),
+            ), ContextExitAwaitStatus::Synchronous),
             IsAsync::Async => match self.unwrap_awaitable(&self.call_method_or_error(
                 context_manager_type,
                 &kind.context_exit_dunder(),
@@ -1845,15 +1858,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 swallow_errors,
                 context,
             )) {
-                Some(ty) => ty,
+                Some(ty) => (ty, ContextExitAwaitStatus::Awaitable),
                 // We emit this error directly, since it's different from type checking the arguments
-                None => self.error_with_context(
+                None => (self.error_with_context(
                     errors,
                     range,
                     ErrorKind::NotAsync,
                     format!("Expected `{}` to be async", dunder::AEXIT),
                     context,
-                ),
+                ), ContextExitAwaitStatus::NotAwaitable),
             },
         };
         let base_exception_class_type = self.heap.mk_type_of(
@@ -1881,8 +1894,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let exit_with_error_errors =
             ErrorCollector::new(errors.module().clone(), ErrorStyle::Delayed);
         let exit_with_ok_errors = ErrorCollector::new(errors.module().clone(), ErrorStyle::Delayed);
-        let error_args_result = call_exit(&exit_with_error_args, &exit_with_error_errors);
-        let ok_args_result = call_exit(&exit_ok_args, &exit_with_ok_errors);
+        let (error_args_result, error_awaitability) = call_exit(&exit_with_error_args, &exit_with_error_errors);
+        let (ok_args_result, ok_awaitability) = call_exit(&exit_ok_args, &exit_with_ok_errors);
+        if let Some(observer) = observer {
+            observer(&error_args_result, &exit_with_error_errors, error_awaitability, &ok_args_result, &exit_with_ok_errors, ok_awaitability);
+        }
         // If the call only has one error we can directly forward it
         // If there is more than one error, we emit a generic error instead of emitting one error for each mismatched argument
         if exit_with_error_errors.len() <= 1 {
@@ -1914,6 +1930,57 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             with_exception: error_args_result,
             without_exception: ok_args_result,
         }
+    }
+
+    pub(crate) fn observe_context_exit(
+        &self,
+        range: TextRange,
+        kind: IsAsync,
+    ) -> Option<crate::alt::observations::ContextExitObservation> {
+        use crate::alt::observations::{ContextExitAwaitStatus, ContextExitCallObservation, ContextExitObservation, NativeCallStatus};
+        let context_idx = self.bindings().keys::<Key>().find_map(|idx| {
+            match self.bindings().get(idx) {
+                Binding::ContextValue(_, context_idx, context_range, context_kind)
+                    if *context_range == range && *context_kind == kind => Some(*context_idx),
+                _ => None,
+            }
+        })?;
+        self.without_tracing(|| {
+            let mut receiver = self.get_idx(context_idx).ty().clone();
+            self.current().solver().force_mut(&mut receiver);
+            let member_errors = ErrorCollector::new(self.module().clone(), ErrorStyle::Delayed);
+            let member_name = kind.context_exit_dunder();
+            let mut member = self.attr_infer_for_type(&receiver, &member_name, range, &member_errors, None);
+            self.current().solver().force_mut(&mut member);
+            let await_errors = ErrorCollector::new(self.module().clone(), ErrorStyle::Delayed);
+            let mut calls = None;
+            self.context_value_exit_observed(&receiver, kind, range, &await_errors, None, Some(&mut |exceptional, exceptional_errors, exceptional_awaitability, normal, normal_errors, normal_awaitability| {
+                let make = |ty: &Type, errors: &ErrorCollector, awaitability| {
+                    let mut result = ty.clone();
+                    self.current().solver().force_mut(&mut result);
+                    let mut diagnostics = errors.native_observation_diagnostics();
+                    if awaitability == ContextExitAwaitStatus::NotAwaitable {
+                        diagnostics.extend(await_errors.native_observation_diagnostics().into_iter().filter(|d| d.kind == ErrorKind::NotAsync));
+                    }
+                    ContextExitCallObservation {
+                        result, awaitability,
+                        status: if errors.has_hard() || awaitability == ContextExitAwaitStatus::NotAwaitable { NativeCallStatus::HardDiagnostics } else { NativeCallStatus::NoHardDiagnostics },
+                        diagnostics,
+                    }
+                };
+                calls = Some((make(exceptional, exceptional_errors, exceptional_awaitability), make(normal, normal_errors, normal_awaitability)));
+            }));
+            let (exceptional, normal) = calls?;
+            // Remove argument diagnostics already represented before collapse. The remaining
+            // native NotAsync diagnostics belong to awaitability, not argument applicability.
+            let await_diagnostics = await_errors.native_observation_diagnostics().into_iter()
+                .filter(|diagnostic| diagnostic.kind == ErrorKind::NotAsync).collect();
+            Some(ContextExitObservation {
+                range, kind, receiver, member_name, member,
+                member_diagnostics: member_errors.native_observation_diagnostics(),
+                normal, exceptional, await_diagnostics,
+            })
+        })
     }
 
     fn context_value(
@@ -4390,16 +4457,60 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         //   inconsistent override, so it stays trusted.
         // - `raise NotImplementedError`, the abstract placeholder, which describes unimplemented
         //   code rather than code that genuinely diverges.
-        let callee_is_a_method = matches!(callee, Type::BoundMethod(_));
-        if callee.toplevel_func_metadata().is_some_and(|meta| {
-            meta.flags.body_kind == BodyKind::RaiseNotImplementedError
-                || (callee_is_a_method && meta.flags.is_return_inferred)
-        }) {
+        if Self::terminal_call_exclusion(&callee).is_some() {
             return false;
         }
         callee
             .to_callable()
             .is_some_and(|callable| callable.ret.is_never())
+    }
+
+    fn terminal_call_exclusion(callee: &Type) -> Option<crate::alt::observations::TerminalCallDecision> {
+        use crate::alt::observations::TerminalCallDecision;
+        let metadata = callee.toplevel_func_metadata()?;
+        if metadata.flags.body_kind == BodyKind::RaiseNotImplementedError {
+            Some(TerminalCallDecision::NotImplementedBody)
+        } else if matches!(callee, Type::BoundMethod(_)) && metadata.flags.is_return_inferred {
+            Some(TerminalCallDecision::InferredMethodReturn)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn observe_terminal_call(
+        &self,
+        result: Idx<Key>,
+    ) -> Option<crate::alt::observations::TerminalCallObservation> {
+        use crate::alt::observations::{TerminalCallDecision, TerminalCallObservation};
+        let Binding::StmtExpr(expr, _) = self.bindings().get(result) else { return None };
+        let Expr::Call(call) = &**expr else { return None };
+        // Keep reachability inference out of hover and overload traces, as upstream does.
+        let callee = self.without_tracing(|| self.expr_infer(&call.func, &self.error_swallower()));
+        let is_bound_method = matches!(callee, Type::BoundMethod(_));
+        let metadata = callee.toplevel_func_metadata();
+        let return_is_inferred = metadata.map(|meta| meta.flags.is_return_inferred);
+        let return_type = callee.clone().to_callable().map(|callable| callable.ret);
+        let decision = if let Some(exclusion) = Self::terminal_call_exclusion(&callee) {
+            exclusion
+        } else if return_type.as_ref().is_some_and(Type::is_never) {
+            TerminalCallDecision::DeclaredOrInferredDivergence
+        } else if callee.is_never() {
+            TerminalCallDecision::NarrowedNeverCallee
+        } else if return_type.is_some() {
+            TerminalCallDecision::NonDivergentCallable
+        } else {
+            TerminalCallDecision::NoNativeCallableSignature
+        };
+        let mut observation = TerminalCallObservation {
+            range: call.range(), callee, return_type, return_is_inferred, is_bound_method, decision,
+        };
+        // Decide using exactly the native checks above, then force owned copies while the
+        // answer context is live. Quantified identities remain structural, not inference vars.
+        self.current().solver().force_mut(&mut observation.callee);
+        if let Some(return_type) = &mut observation.return_type {
+            self.current().solver().force_mut(return_type);
+        }
+        Some(observation)
     }
 
     /// Whether every path ending in one of these expressions diverges, so control never gets
