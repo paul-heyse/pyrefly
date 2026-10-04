@@ -34,7 +34,7 @@ mod compat;
 #[doc(hidden)]
 pub mod embed;
 mod error;
-mod export;
+pub mod export;
 #[doc(hidden)]
 pub mod lsp;
 mod memory_project;
@@ -42,7 +42,7 @@ mod memory_project;
 pub mod module;
 pub mod playground;
 pub mod query;
-mod report;
+pub mod report;
 // Re-export the generated Cap'n Proto module at crate root, because the generated
 // code references types via `crate::pysa_report_capnp::...`.
 #[allow(clippy::all)]

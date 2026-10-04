@@ -864,6 +864,11 @@ impl<'a> Transaction<'a> {
         self.data.pysa_reporter.take()
     }
 
+    /// lctx: borrow the installed pysa reporter (its `ModuleIds`) while modules still solve lazily.
+    pub fn pysa_reporter(&self) -> Option<&crate::report::pysa::PysaReporter> {
+        self.data.pysa_reporter.as_deref()
+    }
+
     /// Set the cinderx reporter for inline extraction during type checking.
     pub fn set_cinderx_reporter(
         &mut self,
@@ -2320,6 +2325,33 @@ impl<'a> Transaction<'a> {
         let _ = self.run_internal(handles, require, custom_thread_pool);
     }
 
+    /// Observe the native normal/error exit calls for an actual located context binding.
+    /// Requires retained Answers (`Require::Everything`); returns None for a missing binding.
+    /// Encode the native Types while this transaction remains live.
+    pub fn observe_context_exit(
+        &self,
+        handle: &Handle,
+        range: ruff_text_size::TextRange,
+        kind: crate::binding::binding::IsAsync,
+    ) -> Option<crate::alt::observations::ContextExitObservation> {
+        self.ad_hoc_solve(handle, "observe_context_exit", |solver| solver.observe_context_exit(range, kind)).flatten()
+    }
+
+    /// Observe the solver's qualified divergence checks on a bound call statement.
+    /// A Never call result alone is deliberately not used as divergence evidence.
+    pub fn observe_terminal_call(
+        &self,
+        handle: &Handle,
+        range: ruff_text_size::TextRange,
+    ) -> Option<crate::alt::observations::TerminalCallObservation> {
+        self.ad_hoc_solve(handle, "observe_terminal_call", |solver| {
+            let idx = solver.bindings().keys::<crate::binding::binding::Key>().find(|idx| {
+                matches!(solver.bindings().idx_to_key(*idx), crate::binding::binding::Key::StmtExpr(r) if *r == range)
+            })?;
+            solver.observe_terminal_call(idx)
+        }).flatten()
+    }
+
     pub(crate) fn ad_hoc_solve<R: Sized, F: FnOnce(AnswersSolver<TransactionHandle>) -> R>(
         &self,
         handle: &Handle,
@@ -2699,9 +2731,16 @@ impl<'a> Transaction<'a> {
         builtin_module_for_name(&self.lookup(module_data), handle.module(), name)
     }
 
-    pub(crate) fn get_exports_data(&self, handle: &Handle) -> Arc<Exports> {
+    pub fn get_exports_data(&self, handle: &Handle) -> Arc<Exports> {
         let module_data = self.get_module(handle);
         self.lookup_export(module_data)
+    }
+
+    /// The names `from <module> import *` binds.
+    pub fn get_wildcard(&self, handle: &Handle) -> Arc<SmallSet<Name>> {
+        let module_data = self.get_module(handle);
+        self.lookup_export(module_data)
+            .wildcard(&self.lookup(module_data))
     }
 
     pub fn get_module_docstring_range(&self, handle: &Handle) -> Option<TextRange> {

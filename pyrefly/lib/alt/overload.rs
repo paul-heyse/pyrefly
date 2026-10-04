@@ -32,7 +32,7 @@ use starlark_map::small_set::SmallSet;
 use vec1::Vec1;
 
 use crate::alt::answers::LookupAnswer;
-use crate::alt::answers::OverloadTrace;
+use crate::alt::answers::{OverloadTrace, NativeOverloadSelection};
 use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::call::TargetWithTParams;
 use crate::alt::callable::ArgMap;
@@ -59,6 +59,7 @@ use crate::types::types::Var;
 
 struct CalledOverload<'f> {
     func: &'f TargetWithTParams<Function>,
+    origin_selection: NativeOverloadSelection,
     res: Type,
     ctor_targs: Option<TArgs>,
     table: OverloadTable,
@@ -348,6 +349,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             Err(_) => (
                 CalledOverload {
                     func: arity_closest_overload.unwrap().0,
+                    origin_selection: NativeOverloadSelection::ClosestOnly,
                     res: self.heap.mk_any_error(),
                     ctor_targs: None,
                     table: OverloadTable::default(),
@@ -421,6 +423,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                 && !self.is_equivalent(&expanded_res, &closest_overload.res)
                             {
                                 closest_overload.res = expanded_res;
+                                closest_overload.origin_selection = NativeOverloadSelection::ExpandedRepresentative;
                                 break;
                             }
                             continue 'outer;
@@ -445,6 +448,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             .collect();
                         closest_overload = CalledOverload {
                             func,
+                            origin_selection: NativeOverloadSelection::ExpandedRepresentative,
                             ctor_targs,
                             table,
                             argmap,
@@ -461,6 +465,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         matched = true;
                         break;
                     }
+                }
+                if !matched && arity_compatible_overloads.len() == 1 {
+                    closest_overload.origin_selection = NativeOverloadSelection::Recovered;
                 }
                 (
                     closest_overload,
@@ -486,7 +493,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     .as_ref()
                     .filter(|tparams| !tparams.is_empty())
                     .cloned();
-                OverloadTrace::new(target.1.signature.clone(), tparams)
+                OverloadTrace::new(target.1.signature.clone(), tparams, target.1.metadata.kind.as_func_def_id().cloned())
             };
             let all_overload_traces = overloads.iter().map(&mut overload_trace).collect();
             let closest_overload_trace = overload_trace(closest_overload.func);
@@ -495,6 +502,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 all_overload_traces,
                 closest_overload_trace,
                 matched,
+                overloads.iter().position(|target| std::ptr::eq(target, closest_overload.func))
+                    .expect("Closest overload belongs to the original input vector"),
+                closest_overload.origin_selection,
             );
         }
         if matched {
@@ -1020,7 +1030,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     .nth(idx)
                     .expect("Could not find selected overload");
                 // Now that we've selected an overload, use the hint to contextually type the arguments.
-                let contextual_overload = self.call_overload(
+                let mut contextual_overload = self.call_overload(
                     overload.func,
                     metadata,
                     shape_transform,
@@ -1032,6 +1042,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     Some(&overload.defaults_used),
                     ctor_targs,
                 );
+                contextual_overload.origin_selection = NativeOverloadSelection::Selected;
+                let mut overload = overload;
+                overload.origin_selection = NativeOverloadSelection::Selected;
                 (
                     // The contextual pass may legitimately introduce late resolution errors, so
                     // we only fall back to the no-hint version on hard call errors. See
@@ -1052,6 +1065,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 (
                     CalledOverload {
                         res: self.heap.mk_any_implicit(),
+                        origin_selection: NativeOverloadSelection::AmbiguousRepresentative,
                         ..first_overload
                     },
                     true,
@@ -1173,6 +1187,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             );
         CalledOverload {
             func: callable,
+            origin_selection: NativeOverloadSelection::ClosestOnly,
             res,
             ctor_targs: overload_ctor_targs,
             table,
