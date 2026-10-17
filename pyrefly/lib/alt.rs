@@ -21,6 +21,7 @@ pub mod map_int_tuples;
 pub mod narrow;
 pub mod nn_module_specials;
 pub mod operators;
+pub mod observations;
 pub mod overload;
 pub mod polars_specials;
 pub mod regex;

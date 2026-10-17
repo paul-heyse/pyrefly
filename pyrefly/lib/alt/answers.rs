@@ -85,6 +85,7 @@ use crate::types::heap::TypeHeap;
 use crate::types::stdlib::Stdlib;
 use crate::types::types::Forall;
 use crate::types::types::Forallable;
+use crate::types::function::FuncDefId;
 use crate::types::types::TParams;
 use crate::types::types::Type;
 
@@ -142,6 +143,7 @@ impl VisitMut<Type> for Traces {
                     let OverloadTrace {
                         callable,
                         tparams: _,
+                        origin: _,
                     } = trace;
                     callable.visit_mut(f);
                 }
@@ -149,6 +151,7 @@ impl VisitMut<Type> for Traces {
                     for OverloadTrace {
                         callable,
                         tparams: _,
+                        origin: _,
                     } in all.iter_mut().chain(std::iter::once(closest))
                     {
                         callable.visit_mut(f);
@@ -163,11 +166,12 @@ impl VisitMut<Type> for Traces {
 pub struct OverloadTrace {
     callable: Callable,
     tparams: Option<Arc<TParams>>,
+    origin: Option<FuncDefId>,
 }
 
 impl OverloadTrace {
-    pub(crate) fn new(callable: Callable, tparams: Option<Arc<TParams>>) -> Self {
-        Self { callable, tparams }
+    pub(crate) fn new(callable: Callable, tparams: Option<Arc<TParams>>, origin: Option<FuncDefId>) -> Self {
+        Self { callable, tparams, origin }
     }
 
     fn as_type(&self) -> Type {
@@ -181,6 +185,30 @@ impl OverloadTrace {
     }
 }
 
+/// Observation-only selection state; legacy IDE recovery is not a unique member choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeOverloadSelection {
+    Resolved,
+    Selected,
+    AmbiguousRepresentative,
+    ExpandedRepresentative,
+    ClosestOnly,
+    Recovered,
+}
+#[derive(Debug, Clone)]
+pub struct NativeOverloadCandidate {
+    pub ordinal: usize,
+    pub callable: Callable,
+    pub tparams: Option<Arc<TParams>>,
+    pub origin: Option<FuncDefId>,
+}
+#[derive(Debug, Clone)]
+pub struct NativeOverloadTrace {
+    pub candidates: Vec<NativeOverloadCandidate>,
+    pub closest_ordinal: usize,
+    pub selection: NativeOverloadSelection,
+}
+
 #[derive(Debug, Clone)]
 pub enum OverloadedCallee {
     Resolved {
@@ -190,6 +218,8 @@ pub enum OverloadedCallee {
         all: Vec<OverloadTrace>,
         closest: OverloadTrace,
         is_closest_chosen: bool,
+        closest_ordinal: usize,
+        selection: NativeOverloadSelection,
     },
 }
 
@@ -1665,6 +1695,25 @@ impl Answers {
         }
     }
 
+    /// Original member identities and run-local vector ordinals before callable erasure.
+    /// Representative and recovery states never certify a unique selected member.
+    pub fn get_native_overload_trace(&self, range: TextRange) -> Option<NativeOverloadTrace> {
+        let lock = self.trace.as_ref()?.lock();
+        let candidate = |ordinal, trace: &OverloadTrace| NativeOverloadCandidate {
+            ordinal, callable: trace.callable.clone(), tparams: trace.tparams.clone(), origin: trace.origin.clone(),
+        };
+        Some(match lock.overloaded_callees.get(&range)? {
+            OverloadedCallee::Resolved { callable } => NativeOverloadTrace {
+                candidates: vec![candidate(0, callable)], closest_ordinal: 0,
+                selection: NativeOverloadSelection::Resolved,
+            },
+            OverloadedCallee::Candidates { all, closest_ordinal, selection, .. } => NativeOverloadTrace {
+                candidates: all.iter().enumerate().map(|(ordinal, trace)| candidate(ordinal, trace)).collect(),
+                closest_ordinal: *closest_ordinal, selection: *selection,
+            },
+        })
+    }
+
     /// Returns all the overload, and the index of a chosen one
     pub fn get_all_overload_trace(
         &self,
@@ -1714,7 +1763,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             self.trace_state().record_resolved_trace(
                 loc,
                 OverloadedCallee::Resolved {
-                    callable: OverloadTrace::new(callable, None),
+                    callable: OverloadTrace::new(callable, None, match ty {
+                        Type::Function(function) => function.metadata.kind.as_func_def_id().cloned(),
+                        Type::Forall(forall) => match &forall.body {
+                            Forallable::Function(function) => function.metadata.kind.as_func_def_id().cloned(),
+                            _ => None,
+                        },
+                        _ => None,
+                    }),
                 },
             );
         }
@@ -1728,6 +1784,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         all_overloads: Vec<OverloadTrace>,
         closest_overload: OverloadTrace,
         is_closest_overload_chosen: bool,
+        closest_ordinal: usize,
+        selection: NativeOverloadSelection,
     ) {
         if self.current().trace.is_some() {
             self.trace_state().record_overload_trace(
@@ -1736,6 +1794,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     all: all_overloads,
                     closest: closest_overload,
                     is_closest_chosen: is_closest_overload_chosen,
+                    closest_ordinal,
+                    selection,
                 },
             );
         }

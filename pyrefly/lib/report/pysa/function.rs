@@ -7,6 +7,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::ops::Not;
 
 use dupe::Dupe;
@@ -901,6 +902,17 @@ pub fn export_function_definitions(
     reversed_override_graph: &ModuleReversedOverrideGraph,
     context: &ModuleContext,
 ) -> ModuleFunctionDefinitions<FunctionDefinition> {
+    export_function_definitions_selected(captured_variables, reversed_override_graph, context, None)
+}
+
+/// Export payloads only after their native base-definition keys have been selected.
+/// Selection does not change the module's complete base-definition inventory.
+pub(super) fn export_function_definitions_selected(
+    captured_variables: &HashMap<FunctionRef, Vec<CapturedVariableRef<FunctionRef>>>,
+    reversed_override_graph: &ModuleReversedOverrideGraph,
+    context: &ModuleContext,
+    selected: Option<&HashSet<FunctionId>>,
+) -> ModuleFunctionDefinitions<FunctionDefinition> {
     let mut function_definitions = ModuleFunctionDefinitions::new();
 
     for function in get_all_functions(&context.answers_context) {
@@ -908,6 +920,9 @@ pub fn export_function_definitions(
             continue;
         }
         let current_function = function.as_function_ref(&context.answers_context);
+        if selected.is_some_and(|selected| !selected.contains(&current_function.function_id)) {
+            continue;
+        }
         let current_module_solutions = context.resolver.current_module_solutions();
         let function_base_definition = current_module_solutions
             .function_base_definitions

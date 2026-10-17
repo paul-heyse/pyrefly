@@ -223,6 +223,15 @@ impl ErrorCollector {
 
     /// Count of errors excluding soft diagnostics (which should not
     /// influence overload selection or type-inference decisions).
+    pub(crate) fn native_observation_diagnostics(&self) -> Vec<crate::alt::observations::NativeDiagnostic> {
+        self.errors.lock().iter().map(|error| crate::alt::observations::NativeDiagnostic {
+            range: error.range(),
+            kind: error.error_kind(),
+            message: error.msg_header().to_owned(),
+            details: error.msg_details().map(str::to_owned),
+        }).collect()
+    }
+
     pub fn len_hard(&self) -> usize {
         self.errors.lock().len_hard()
     }
